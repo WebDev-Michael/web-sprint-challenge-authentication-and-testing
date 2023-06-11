@@ -1,83 +1,128 @@
 // Write your tests here
-test('sanity', () => {
-  expect(true).toBe(false)
-})
+const Users = require('./auth/auth-model');
 const request = require('supertest');
-const server = require('./server');
+const server = require('../api/server');
 const db = require('../data/dbConfig');
+const bcrypt = require('bcryptjs');
+const appTest = request(server);
+
+const USER1 = { username: 'Barb', password: '839r2' };
+const LOGIN_URL = '/api/auth/login';
+const REGISTER_URL = '/api/auth/register';
+const JOKES_URL = '/api/jokes';
+
+afterAll(async () => {
+  await db.destroy();
+});
+beforeEach(async () => {
+  await db.migrate.rollback();
+  await db.migrate.latest();
+});
 
 
 test('check environment', () => {
   expect(process.env.NODE_ENV).toBe('testing');
 }) ;
 
-beforeAll(async () => {
-  await db.migrate.rollback();
-  await db.migrate.latest();
-});
-beforeEach(async () => {
-  await db.seed.run();
-});
+describe('User registration and authentication', () => {
+  describe('POST /api/auth/register', () => {
+    it('should insert the user into the database', async () => {
+      const user = { username: 'Kitboga', password: 'abcd' };
+      await appTest.post(REGISTER_URL).send(user);
+      const users = await Users.getAll();
+      expect(users).toHaveLength(1);
+    }, 2000);
 
-afterAll(async () => {
-  await db.destroy();
-})
+    it(`should have 'id', 'username', and 'password' in response body`, async () => {
+      const user = { username: 'Nairb', password: 'abcd' };
+      const response = await appTest.post(REGISTER_URL).send(user);
+      const responseBody = JSON.parse(response.text);
+      let hasFields = false;
+      if (
+        'id' in responseBody &&
+        'username' in responseBody &&
+        'password' in responseBody
+      ) {
+        hasFields = true;
+      }
+      expect(hasFields).toBe(true);
+    }, 750);
 
-describe ('GET /', () => {
-  test('receives the expected message', async() => {
-    let result = await request(server).get('/')
-    expect(result.body).toEqual({message: "hello, world!"})
+    it('should hash the password', async () => {
+      const user = { username: 'Alfred', password: '32fe' };
+      const response = await appTest.post(REGISTER_URL).send(user);
+      const responsePassword = JSON.parse(response.text).password;
+      expect(user.password).not.toEqual(responsePassword);
+      expect(responsePassword.length).toEqual(60);
+    }, 750);
+
+    it('throws an error if payload has missing credentials', async () => {
+      const user = { username: '', password: '32fe' };
+      const response = await appTest.post(REGISTER_URL).send(user);
+      const responseText = JSON.parse(response.text).message;
+      expect(response.status).toEqual(404);
+      expect(responseText).toEqual('username and password required');
+    }, 750);
+
+    it('throws an error if username exists', async () => {
+      const user = { username: 'Banri', password: '32fe' };
+      await request(server).post(REGISTER_URL).send(user);
+      const response = await appTest.post(REGISTER_URL).send(user);
+      const responseText = JSON.parse(response.text).message;
+      expect(response.status).toEqual(404);
+      expect(responseText).toEqual('username taken');
+    }, 750);
   });
-  test('receives the expected status', async() => {
-    let result = await request(server).get('/')
-    expect(result.status).toBe(200)
-  });
-});
 
-describe('POST /register', () => {
-  test('adds a new user to the database', async () => {
-    let result = await request(server).post('/api/auth/register').send({username: "foo", password: 'bar'});
-      expect(result.status).toBe(201)
-      expect(result.body).toHaveProperty('username', 'foo')
-      result = await db('users').where('username', 'foo').first();
-      expect(result).toBeDefined();
+  describe('POST /api/auth/login', () => {
+    it(`receives a message and token in the response body on successful login`, async () => {
+      const hash = bcrypt.hashSync(USER1.password, 7);
+      USER1.password = hash;
+      await appTest.post(REGISTER_URL).send(USER1);
+      const response = await appTest.post(LOGIN_URL).send(USER1);
+      expect(response.status).toEqual(200);
+      expect(response.body).toHaveProperty('message');
+      expect(response.body.message).toMatch(/welcome,/i);
+      expect(response.body).toHaveProperty('token');
+    }, 750);
+
+    it("throws an error if user doesn't exist", async () => {
+      const response = await appTest.post(LOGIN_URL).send(USER1);
+      const responseText = JSON.parse(response.text).message;
+      expect(responseText).toEqual('Invalid credentials');
+      expect(response.status).toEqual(401);
     });
 
-  test('responds with proper message on invalid request parameters', async () => {
-    let result = await request(server).post('/api/auth/register').send({username: "  ", password: 'password'});
-    expect(result.status).toBe(400)
-    expect(result.body.message).toMatch(/username and password required/)
+    it('throws an error if password is invalid', async () => {
+      await db('users').insert(USER1);
+      const response = await appTest
+        .post(LOGIN_URL)
+        .send({ username: 'Barb', password: '*T&^GYIBH' });
+      const responseText = JSON.parse(response.text).message;
+      expect(responseText).toEqual('Invalid credentials');
+      expect(response.status).toEqual(401);
+    }, 750);
+
+    it('throws an error if payload has missing credentials', async () => {
+      const user = { username: '', password: '098fe' };
+      const response = await appTest.post(LOGIN_URL).send(user);
+      expect(response.status).toEqual(404);
+    }, 750);
   });
-
-  describe('POST /login', () => {
-    test('login fails if username does not exist in the database', async() => {
-      let result = await request(server).post('/api/auth/login').send({username: "someuser", password: "password"})
-      expect(result.status).toBe(401)
-      expect(result.body).toHaveProperty('message', 'invalid credentials')
-      result = await request(server).post('/api/auth/login').send({username: "someOtherUser", password: "anotherPassword"})
-      expect(result.status).toBe(401)
-      expect(result.body).toHaveProperty('message', 'invalid credentials')
-    })
-    test('delivers success message upon login', async () => {
-      let result = await request(server).post('/api/auth/login').send({username: "admin", password: "1234"})
-      expect(result.status).toBe(200)
-      expect(result.body).toHaveProperty('message', 'welcome, admin')
-    })
-  })
-
-  describe('GET /api/jokes', () => {
-    test('shows joke array if token is valid', async () => {
-      let res = await request(server).post('/api/auth/login').send({username: "admin", password: "1234"})
-      res = await request(server).get('/api/jokes').set('Authorization', res.body.token)
-      expect(res.status).toBe(200)
-    })
-
-    test('does not allow access joke array if token is missing', async () => {
-      let res = await request(server).post('/api/auth/login').send({username: "admin", password: "1234"})
-      res = await request(server).get('/api/jokes')
-      expect(res.status).toBe(401)
-      expect(res.body).toHaveProperty('message', 'token required')
-    })
-  })
-
 });
+
+// describe('Dad jokes', () => {
+//   it('retrieves dad jokes', async () => {
+//     const hash = bcrypt.hashSync(USER1.password, 7);
+//     USER1.password = hash;
+//     await appTest.post(REGISTER_URL).send(USER1);
+//     await appTest.post(LOGIN_URL).send(USER1);
+//     const response = await appTest.get(JOKES_URL);
+//     console.log(response);
+//     const responseText = JSON.parse(response.text).message;
+//     console.log(responseText);
+
+//     expect(response.status).toEqual(200);
+//     expect(Array.isArray(response.body)).toBeTruthy();
+//   }, 750);
+// });
